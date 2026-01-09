@@ -29,28 +29,28 @@ export const db = {
       }
       return { success: true };
     } catch (err: any) {
-      console.error('Supabase connection test failed:', err);
-      let errorMessage = 'Kon geen verbinding maken met de database.';
-
-      if (typeof err === 'object' && err !== null && err.message) {
-        // This handles Supabase PostgrestError and many other error objects
-        errorMessage = err.message;
-        if (err.details) errorMessage += ` Details: ${err.details}`;
-        if (err.hint) errorMessage += ` Hint: ${err.hint}`;
-
-        // Add more specific user-friendly messages for common issues
-        if (errorMessage.toLowerCase().includes('failed to fetch')) {
-            errorMessage = 'Netwerkfout: Kon de Supabase server niet bereiken. Controleer de internetverbinding en de Project URL in `supabaseClient.ts`.';
-        } else if (errorMessage.toLowerCase().includes('invalid jwt') || errorMessage.toLowerCase().includes('api key')) {
-            errorMessage = 'Authenticatiefout: De Supabase API Key is ongeldig. Controleer de `anon` key in `supabaseClient.ts`.';
-        }
-      } else if (err instanceof Error) {
-        errorMessage = err.message;
+      // FIX: Verbeterde error logging en message creatie om "[object Object]" te voorkomen.
+      let detailedMessage = 'Kon geen verbinding maken met de database.';
+      
+      if (err instanceof Error) {
+        detailedMessage = err.message;
+      } else if (typeof err === 'object' && err !== null && err.message) {
+        detailedMessage = String(err.message);
+        if (err.details) detailedMessage += ` Details: ${String(err.details)}`;
+        if (err.hint) detailedMessage += ` Hint: ${String(err.hint)}`;
       } else if (typeof err === 'string') {
-        errorMessage = err;
+        detailedMessage = err;
       }
-
-      return { success: false, message: errorMessage };
+      
+      // Maak de boodschap gebruiksvriendelijker voor veelvoorkomende problemen
+      if (detailedMessage.toLowerCase().includes('failed to fetch')) {
+        detailedMessage = 'Netwerkfout: Kon de Supabase server niet bereiken. Controleer de internetverbinding en de Project URL in `supabaseClient.ts`.';
+      } else if (detailedMessage.toLowerCase().includes('invalid jwt') || detailedMessage.toLowerCase().includes('api key')) {
+        detailedMessage = 'Authenticatiefout: De Supabase API Key is ongeldig. Controleer de `anon` key in `supabaseClient.ts`.';
+      }
+      
+      console.error('Supabase connection test failed:', detailedMessage, { originalError: err });
+      return { success: false, message: detailedMessage };
     }
   },
 
@@ -205,6 +205,12 @@ export const db = {
     });
     if (error) throw error;
   },
+  
+  deleteModule: async (id: string) => {
+    if (!isConfigured) throw new Error("Database not configured");
+    const { error } = await supabase.from('modules').delete().eq('id', id);
+    if (error) throw error;
+  },
 
   updateModuleDetails: async (id: string, color: string, name: string) => {
     if (!isConfigured) return;
@@ -274,7 +280,14 @@ export const db = {
         }))
       }));
     } catch (err: any) {
-      console.error('CRITICAL DATABASE ERROR:', err.message || err);
+      // FIX: Verbeterde error logging om "[object Object]" te voorkomen.
+      let detailedMessage = "Fout bij het ophalen van koffers.";
+      if (err instanceof Error) {
+        detailedMessage = err.message;
+      } else if (typeof err === 'object' && err !== null && err.message) {
+        detailedMessage = String(err.message);
+      }
+      console.error('CRITICAL DATABASE ERROR in getBackpacks:', detailedMessage, { originalError: err });
       return [];
     }
   },

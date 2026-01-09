@@ -80,7 +80,7 @@ const BackpackDesigner: React.FC<BackpackDesignerProps> = ({
     return () => window.removeEventListener('resize', handleResize);
   }, [modules]);
 
-  const { CELL_SIZE, GAP_SIZE } = useMemo(() => isMobile ? { CELL_SIZE: 50, GAP_SIZE: 4 } : { CELL_SIZE: 80, GAP_SIZE: 8 }, [isMobile]);
+  const { CELL_SIZE, GAP_SIZE } = useMemo(() => isMobile ? { CELL_SIZE: 50, GAP_SIZE: 4 } : { CELL_SIZE: 64, GAP_SIZE: 6 }, [isMobile]);
 
   const handleDragStart = (e: React.DragEvent, shape: Shape) => {
     if (mode !== 'DESIGN') return;

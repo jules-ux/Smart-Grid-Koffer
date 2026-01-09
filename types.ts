@@ -16,6 +16,7 @@ export interface ContentDefinition {
   description?: string;
   default_width?: number; // Suggestie voor grid grootte
   default_height?: number;
+  default_color?: string; // e.g. "red", "blue"
 }
 
 // Uitgebreid Artikel (Nu inclusief batch/stock info)
@@ -44,7 +45,7 @@ export interface RecipeItem {
 export interface ModuleContent {
   id: string;
   module_id: string;
-  article_name: string;
+  article_id: string; // FIX: Changed from article_name to article_id to match DB schema
   batch_number: string;
   expiry_date: string;
   quantity: number;

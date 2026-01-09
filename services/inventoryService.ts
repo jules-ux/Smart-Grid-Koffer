@@ -16,8 +16,9 @@ export const parseRFID = (id: string): ParsedID => {
 };
 
 // New function to format the ID for display, now handles placeholders
-export const formatRFID = (id: string): string => {
-  if (!id || (id.length !== 8 && !id.includes('XX'))) {
+export const formatRFID = (id: string | null | undefined): string => {
+  if (!id) return '';
+  if (id.length !== 8 && !id.includes('XX')) {
     return id; // Return as is if not a valid format
   }
   

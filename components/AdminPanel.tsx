@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Plus, Trash2, QrCode, Tag, Package, Printer, Save, Warehouse, ArrowRight, Layers, Database, Copy, Check, ShoppingBag, Clock, Calendar, Smartphone, RefreshCw, Wifi, X, AlertTriangle, Search, Grid, Download } from 'lucide-react';
+// FIX: Added ChevronDown to the import from lucide-react.
+import { Plus, Trash2, QrCode, Tag, Package, Printer, Save, Warehouse, ArrowRight, Layers, Database, Copy, Check, ShoppingBag, Clock, Calendar, Smartphone, RefreshCw, Wifi, X, AlertTriangle, Search, Grid, Download, ChevronDown } from 'lucide-react';
 import { db } from '../services/database';
-import { formatRFID } from '../services/inventoryService';
+import { formatRFID, parseRFID } from '../services/inventoryService';
 import { Backpack, ContentDefinition, Article, RecipeItem, ModuleContent, Module } from '../types';
 import BackpackDesigner from './BackpackDesigner';
 
@@ -12,8 +13,14 @@ interface AdminPanelProps {
 
 type AdminTab = 'LAYOUT' | 'BACKPACKS' | 'MODULES' | 'MAGAZIJN' | 'INPAKKEN' | 'SQL';
 
-const SQL_SETUP_SCRIPT = `-- 1. Enable Realtime in your Supabase project
--- Go to Database -> Replication and enable it for the desired tables (backpacks, modules).
+const SQL_SETUP_SCRIPT = `-- SmartGrid DB Setup Script
+-- Versie: 2.0
+-- Wijzigingen:
+-- - Toevoeging van 'article_stock' voor centraal voorraadbeheer.
+-- - 'module_contents' gebruikt nu 'article_id' (foreign key) i.p.v. 'article_name' (tekst).
+
+-- 1. Enable Realtime in your Supabase project
+-- Go to Database -> Replication and enable it for the desired tables.
 
 -- 2. Run this SQL script in your Supabase SQL Editor
 
@@ -23,10 +30,11 @@ CREATE TABLE IF NOT EXISTS catalog (
   name TEXT NOT NULL,
   description TEXT,
   default_width INT DEFAULT 1,
-  default_height INT DEFAULT 1
+  default_height INT DEFAULT 1,
+  default_color TEXT
 );
 
--- ARTICLES TABLE (Stock items in the pharmacy)
+-- ARTICLES TABLE (Defines stock items in the pharmacy)
 CREATE TABLE IF NOT EXISTS articles (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
@@ -35,6 +43,18 @@ CREATE TABLE IF NOT EXISTS articles (
   unit TEXT,
   instructions TEXT,
   min_stock_warning INT DEFAULT 0
+);
+
+-- *** NEW *** ARTICLE_STOCK TABLE (Tracks inventory of articles in the central warehouse)
+CREATE TABLE IF NOT EXISTS article_stock (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  article_id UUID REFERENCES articles(id) ON DELETE CASCADE,
+  batch_number TEXT,
+  expiry_date DATE,
+  quantity INT NOT NULL DEFAULT 0,
+  location TEXT, -- e.g., "Shelf A-3"
+  last_updated TIMESTAMPTZ DEFAULT now(),
+  UNIQUE(article_id, batch_number) -- A batch of an article should be unique
 );
 
 -- CATALOG_RECIPES TABLE (Junction table for what articles go into a catalog type)
@@ -75,14 +95,14 @@ CREATE TABLE IF NOT EXISTS modules (
   height INT
 );
 
--- MODULE_CONTENTS TABLE (The actual content of a specific module instance)
+-- *** MODIFIED *** MODULE_CONTENTS TABLE (The actual content of a specific module instance)
 CREATE TABLE IF NOT EXISTS module_contents (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   module_id TEXT REFERENCES modules(id) ON DELETE CASCADE,
-  article_name TEXT,
+  article_id UUID REFERENCES articles(id) ON DELETE SET NULL, -- Changed from article_name to a proper foreign key. SET NULL allows viewing content history even if article is deleted.
   batch_number TEXT,
   expiry_date DATE,
-  quantity INT
+  quantity INT NOT NULL
 );
 
 -- MASTER_LAYOUTS TABLE (Defines the standard grid layout)
@@ -109,11 +129,7 @@ INSERT INTO master_layouts (id, grid_cols, grid_rows)
 SELECT 'default_mug', 4, 6
 WHERE NOT EXISTS (SELECT 1 FROM master_layouts WHERE id = 'default_mug');
 
--- Create policies for RLS (Row Level Security) if needed, e.g.:
--- ALTER TABLE backpacks ENABLE ROW LEVEL SECURITY;
--- CREATE POLICY "Allow public read access" ON backpacks FOR SELECT USING (true);
--- CREATE POLICY "Allow individual insert access" ON backpacks FOR INSERT WITH CHECK (true);
--- (Repeat for other tables as necessary)
+-- RLS (Row Level Security) policies can be added here if needed.
 `;
 
 const inputClasses = "w-full p-2 border border-slate-300 rounded-lg bg-white text-slate-900 placeholder:text-slate-400 focus:ring-1 focus:ring-primary-500 focus:border-primary-500";
@@ -132,10 +148,16 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onBackpackAdded, catalog }) => 
   const [newBackpackHospital, setNewBackpackHospital] = useState('');
   const [newBackpackType, setNewBackpackType] = useState('Spoed');
   const [newBackpackId, setNewBackpackId] = useState('');
+  
+  const [moduleSearchTerm, setModuleSearchTerm] = useState('');
+  const [selectedCatalogForGeneration, setSelectedCatalogForGeneration] = useState('');
+  const [selectedColorForGeneration, setSelectedColorForGeneration] = useState('red');
 
   const [newContentCode, setNewContentCode] = useState('');
   const [newContentName, setNewContentName] = useState('');
   const [newContentDesc, setNewContentDesc] = useState('');
+  const [newContentColor, setNewContentColor] = useState('red');
+  const [codeStatus, setCodeStatus] = useState('');
 
   const [newArticleName, setNewArticleName] = useState('');
   const [newArticleCategory, setNewArticleCategory] = useState('');
@@ -158,6 +180,9 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onBackpackAdded, catalog }) => 
   
   const [copySuccess, setCopySuccess] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  
+  const colorToCodeMap: { [key: string]: string } = { red: '01', blue: '02', yellow: '03', green: '04', grey: '00' };
+  const codeToColorMap: { [key: string]: string } = { '01': 'red', '02': 'blue', '03': 'yellow', '04': 'green', '00': 'grey' };
 
   const fetchData = async () => {
     setIsLoading(true);
@@ -175,6 +200,41 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onBackpackAdded, catalog }) => 
   useEffect(() => {
     fetchData();
   }, []);
+
+  // Debounce effect for content name input
+  const [debouncedContentName, setDebouncedContentName] = useState(newContentName);
+  useEffect(() => {
+      const handler = setTimeout(() => {
+          setDebouncedContentName(newContentName);
+      }, 300);
+      return () => {
+          clearTimeout(handler);
+      };
+  }, [newContentName]);
+
+  // Effect to auto-generate or find content code based on name
+  useEffect(() => {
+    const trimmedName = debouncedContentName.trim();
+    if (!trimmedName) {
+        setNewContentCode('');
+        setCodeStatus('');
+        return;
+    }
+
+    const existing = localCatalog.find(c => c.name.toLowerCase() === trimmedName.toLowerCase());
+
+    if (existing) {
+        setNewContentCode(existing.code);
+        setCodeStatus('Bestaand');
+    } else {
+        const numericCodes = localCatalog.map(c => parseInt(c.code, 10)).filter(num => !isNaN(num));
+        const maxCode = numericCodes.length > 0 ? Math.max(...numericCodes) : 0;
+        const nextCode = (maxCode + 1).toString().padStart(4, '0');
+        setNewContentCode(nextCode);
+        setCodeStatus('Nieuw');
+    }
+  }, [debouncedContentName, localCatalog]);
+
 
   useEffect(() => {
     if (selectedCatalogForRecipe) {
@@ -226,12 +286,17 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onBackpackAdded, catalog }) => 
   };
 
   const handleAddContentDef = async () => {
-    if (!newContentCode || !newContentName) { alert('Code en Naam zijn verplicht.'); return; }
-    await db.addContentDefinition({ code: newContentCode, name: newContentName, description: newContentDesc });
+    if (!newContentCode || !newContentName) { alert('Naam is verplicht.'); return; }
+    await db.addContentDefinition({ 
+        code: newContentCode, 
+        name: newContentName.trim(), 
+        description: newContentDesc,
+        default_color: newContentColor
+    });
     fetchData();
-    setNewContentCode('');
     setNewContentName('');
     setNewContentDesc('');
+    setNewContentColor('red');
   };
   
   const handleAddArticle = async () => {
@@ -264,6 +329,80 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onBackpackAdded, catalog }) => 
     await db.saveMasterLayout('default_mug', masterGridCols, masterGridRows, masterModules);
     alert('Master Layout opgeslagen!');
     fetchData();
+  };
+  
+  const generatedModuleInfo = useMemo(() => {
+    if (!selectedCatalogForGeneration) return null;
+
+    const catalogEntry = localCatalog.find(c => c.code === selectedCatalogForGeneration);
+    if (!catalogEntry) return null;
+
+    const colorCode = colorToCodeMap[selectedColorForGeneration] || '00';
+    const contentCode = catalogEntry.code;
+
+    const relevantModules = allModules.filter(m => 
+        m.id.startsWith(colorCode) && m.id.endsWith(contentCode)
+    );
+
+    const serials = relevantModules.map(m => {
+        const serial = parseInt(m.id.substring(2, 4), 10);
+        return isNaN(serial) ? 0 : serial;
+    });
+
+    const maxSerial = serials.length > 0 ? Math.max(...serials) : 0;
+    const nextSerial = maxSerial + 1;
+    
+    if (nextSerial > 99) {
+        return { error: 'Volgnummer > 99!' };
+    }
+
+    const nextSerialString = nextSerial.toString().padStart(2, '0');
+    const newId = `${colorCode}${nextSerialString}${contentCode}`;
+
+    return {
+      newId,
+      nextSerialString,
+      name: catalogEntry.name,
+      color: selectedColorForGeneration,
+      error: null
+    };
+  }, [selectedCatalogForGeneration, selectedColorForGeneration, allModules, localCatalog]);
+
+  const handleCatalogSelectionChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const code = e.target.value;
+    setSelectedCatalogForGeneration(code);
+    if (code) {
+        const catalogEntry = localCatalog.find(c => c.code === code);
+        if (catalogEntry && catalogEntry.default_color) {
+            setSelectedColorForGeneration(catalogEntry.default_color);
+        }
+    }
+  };
+
+  const handleRegisterModule = async () => {
+    if (!generatedModuleInfo || generatedModuleInfo.error) {
+      alert('Kan zakje niet genereren. Selecteer een type of controleer de volgnummers.');
+      return;
+    }
+    try {
+      await db.registerModule(generatedModuleInfo.newId, generatedModuleInfo.name, generatedModuleInfo.color);
+      alert(`Zakje ${formatRFID(generatedModuleInfo.newId)} succesvol geregistreerd.`);
+      setSelectedCatalogForGeneration('');
+      fetchData();
+    } catch(e: any) {
+      alert(`Fout bij registratie: ${e.message}`);
+    }
+  };
+  
+  const handleDeleteModule = async (id: string) => {
+    if (confirm(`Weet u zeker dat u dit fysieke zakje (${formatRFID(id)}) wilt verwijderen?`)) {
+      try {
+        await db.deleteModule(id);
+        fetchData();
+      } catch (e: any) {
+        alert(`Fout bij verwijderen: ${e.message}`);
+      }
+    }
   };
   
   const handleCopySql = () => {
@@ -306,7 +445,7 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onBackpackAdded, catalog }) => 
               gridRows={masterGridRows}
               onLayoutChange={setMasterModules}
               onGridResize={(cols, rows) => { setMasterGridCols(cols); setMasterGridRows(rows); }}
-              assignableModules={localCatalog.map(c => ({ name: c.name, color: '' }))} 
+              assignableModules={localCatalog.map(c => ({ name: c.name, color: c.default_color || 'grey' }))} 
             />
           </div>
         );
@@ -342,23 +481,180 @@ const AdminPanel: React.FC<AdminPanelProps> = ({ onBackpackAdded, catalog }) => 
           </div>
         );
       case 'MODULES':
+        const colorOptions = [
+            { label: 'Rood', value: 'red', class: 'bg-red-500' },
+            { label: 'Blauw', value: 'blue', class: 'bg-blue-500' },
+            { label: 'Geel', value: 'yellow', class: 'bg-yellow-400' },
+            { label: 'Groen', value: 'green', class: 'bg-green-500' },
+            { label: 'Grijs', value: 'grey', class: 'bg-slate-400' },
+        ];
+        
+        const filteredModules = allModules.filter(m => 
+            m.id.toLowerCase().includes(moduleSearchTerm.toLowerCase()) || 
+            m.name?.toLowerCase().includes(moduleSearchTerm.toLowerCase())
+        );
+
         return (
           <div className="space-y-6">
             <div className="bg-white p-6 rounded-xl shadow-main border border-slate-200">
-              <h3 className="text-lg font-bold text-slate-800 mb-4">Nieuw Type Zakje Definiëren</h3>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <input value={newContentCode} onChange={e => setNewContentCode(e.target.value)} placeholder="Code (4 cijfers)" className={inputClasses} />
-                <input value={newContentName} onChange={e => setNewContentName(e.target.value)} placeholder="Naam (bv. Verbandset)" className={inputClasses} />
-                <input value={newContentDesc} onChange={e => setNewContentDesc(e.target.value)} placeholder="Omschrijving" className={inputClasses} />
+              <h3 className="text-lg font-bold text-slate-800 mb-4">Nieuw Fysiek Zakje Genereren</h3>
+              <div className="space-y-4">
+                 <div>
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">1. Kies Type Zakje</label>
+                    <select value={selectedCatalogForGeneration} onChange={handleCatalogSelectionChange} className={`${selectClasses} mt-1`}>
+                        <option value="">-- Selecteer een gedefinieerd type --</option>
+                        {localCatalog.map(c => <option key={c.code} value={c.code}>{c.name} ({c.code})</option>)}
+                    </select>
+                 </div>
+                 <div className="grid grid-cols-2 gap-4">
+                    <div>
+                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">2. Kies Kleur</label>
+                         <select value={selectedColorForGeneration} onChange={e => setSelectedColorForGeneration(e.target.value)} className={`${selectClasses} mt-1`}>
+                            {colorOptions.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                        </select>
+                    </div>
+                     <div className="bg-slate-50 border border-slate-200 rounded-lg p-2 flex flex-col justify-center">
+                        <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Volgend Volgnummer</span>
+                        <span className="font-mono text-2xl font-bold text-slate-800">
+                           {generatedModuleInfo && !generatedModuleInfo.error ? generatedModuleInfo.nextSerialString : '--'}
+                           {generatedModuleInfo?.error && <span className="text-Danger text-sm">{generatedModuleInfo.error}</span>}
+                        </span>
+                    </div>
+                 </div>
               </div>
-              <button onClick={handleAddContentDef} className="mt-4 bg-primary-700 text-white font-bold py-2 px-4 rounded-lg flex items-center gap-2 hover:bg-primary-800"><Plus className="w-4 h-4"/> Toevoegen</button>
+
+              <div className="mt-4 bg-primary-50 border border-primary-200 rounded-lg p-3 flex items-center justify-between">
+                <span className="text-sm font-medium text-primary-700">Gegenereerde ID:</span>
+                <span className="font-mono text-xl font-bold text-primary-800 bg-primary-100 px-2 py-1 rounded-md">
+                    {generatedModuleInfo && !generatedModuleInfo.error ? formatRFID(generatedModuleInfo.newId) : '-- -- ----'}
+                </span>
+              </div>
+              <button onClick={handleRegisterModule} disabled={!generatedModuleInfo || !!generatedModuleInfo.error} className="mt-4 bg-primary-700 text-white font-bold py-2 px-4 rounded-lg flex items-center gap-2 hover:bg-primary-800 disabled:bg-slate-300 disabled:cursor-not-allowed"><Plus className="w-4 h-4"/> Registreer Nieuw Zakje</button>
             </div>
+            
             <div className="bg-white p-6 rounded-xl shadow-main border border-slate-200">
-              <h3 className="text-lg font-bold text-slate-800 mb-4">Bestaande Definities</h3>
-              <ul className="divide-y divide-slate-100">
-                {localCatalog.map(c => ( <li key={c.code} className="py-2 font-mono text-sm text-slate-600">{c.code} - {c.name}</li> ))}
-              </ul>
+               <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-lg font-bold text-slate-800">Geregistreerde Fysieke Zakjes</h3>
+                  <div className="relative w-full max-w-xs">
+                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                     <input value={moduleSearchTerm} onChange={e => setModuleSearchTerm(e.target.value)} placeholder="Zoek op ID of naam..." className={`${inputClasses} pl-9`} />
+                  </div>
+               </div>
+               <div className="border rounded-lg overflow-hidden max-h-96 overflow-y-auto">
+                 <table className="w-full text-sm">
+                   <thead className="bg-slate-50 text-slate-500 text-xs">
+                     <tr>
+                       <th className="px-3 py-2 text-left font-semibold">ID</th>
+                       <th className="px-3 py-2 text-left font-semibold">Naam</th>
+                       <th className="px-3 py-2 text-left font-semibold">Status</th>
+                       <th className="px-3 py-2 text-left font-semibold">Koffer</th>
+                       <th className="px-3 py-2 text-left font-semibold"></th>
+                     </tr>
+                   </thead>
+                   <tbody className="divide-y divide-slate-100">
+                     {filteredModules.map(m => (
+                       <tr key={m.id}>
+                         <td className="px-3 py-2 font-mono flex items-center gap-2">
+                            <div className={`w-3 h-3 rounded-full ${colorOptions.find(c=>c.value === m.color)?.class || 'bg-slate-300'}`}></div>
+                            {formatRFID(m.id)}
+                         </td>
+                         <td className="px-3 py-2 font-medium text-slate-700">{m.name}</td>
+                         <td className="px-3 py-2 text-slate-600">{m.status}</td>
+                         <td className="px-3 py-2 text-slate-500 font-mono text-xs">{m.backpack_id || '-'}</td>
+                         <td className="px-3 py-2 text-right">
+                            {!m.backpack_id && 
+                                <button onClick={() => handleDeleteModule(m.id)} className="text-slate-400 hover:text-Danger-600 p-1"><Trash2 className="w-3.5 h-3.5"/></button>
+                            }
+                         </td>
+                       </tr>
+                     ))}
+                   </tbody>
+                 </table>
+               </div>
             </div>
+
+            <details className="bg-white rounded-xl shadow-main border border-slate-200">
+                <summary className="p-4 cursor-pointer text-lg font-bold text-slate-800 flex items-center justify-between">
+                    Beheer van Zakje Types (Catalogus)
+                    <ChevronDown className="w-5 h-5 transition-transform" />
+                </summary>
+                <div className="p-6 border-t border-slate-200 space-y-6">
+                     <div className="">
+                      <h3 className="text-lg font-bold text-slate-800 mb-4">Nieuw Type Zakje Definiëren</h3>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <input
+                                value={newContentName}
+                                onChange={e => setNewContentName(e.target.value)}
+                                placeholder="Naam (bv. Verbandset)"
+                                className={`${inputClasses} md:col-span-2`}
+                            />
+                            <div className="relative">
+                                <input
+                                    value={newContentCode}
+                                    readOnly
+                                    placeholder="Code (automatisch)"
+                                    className={`${inputClasses} bg-slate-100 border-slate-200 text-slate-500 cursor-not-allowed pr-20`}
+                                />
+                                {codeStatus && (
+                                    <span className={`absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold px-2 py-0.5 rounded-full ${codeStatus === 'Nieuw' ? 'bg-blue-100 text-blue-800' : 'bg-slate-200 text-slate-600'}`}>
+                                        {codeStatus}
+                                    </span>
+                                )}
+                            </div>
+                            <select value={newContentColor} onChange={e => setNewContentColor(e.target.value)} className={selectClasses}>
+                                {colorOptions.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                            </select>
+                            <input
+                                value={newContentDesc}
+                                onChange={e => setNewContentDesc(e.target.value)}
+                                placeholder="Omschrijving (optioneel)"
+                                className={`${inputClasses} md:col-span-2`}
+                            />
+                        </div>
+                      <div className="mt-4 bg-slate-50 border border-slate-200 rounded-lg p-3 flex items-center justify-between">
+                        <span className="text-sm font-medium text-slate-600"> gegenereerde ID Template:</span>
+                        <span className="font-mono text-lg font-bold text-primary-800 bg-primary-100 px-2 py-1 rounded-md">
+                           {newContentCode ? formatRFID(`${colorToCodeMap[newContentColor] || '00'}XX${newContentCode.padStart(4, '0')}`) : '----'}
+                        </span>
+                      </div>
+                      <button 
+                         onClick={handleAddContentDef} 
+                         disabled={!newContentName || !newContentCode}
+                         className="mt-4 bg-primary-700 text-white font-bold py-2 px-4 rounded-lg flex items-center gap-2 hover:bg-primary-800 disabled:bg-slate-300 disabled:cursor-not-allowed"
+                       >
+                         <Plus className="w-4 h-4"/> Toevoegen
+                      </button>
+                    </div>
+                    <div className="">
+                      <h3 className="text-lg font-bold text-slate-800 mb-4">Bestaande Definities</h3>
+                      <ul className="divide-y divide-slate-100 border rounded-lg">
+                        <li className="py-2 px-3 bg-slate-50 grid grid-cols-3 gap-4 text-xs font-semibold text-slate-500">
+                            <span>Naam & Code</span>
+                            <span className="text-center">Standaard Kleur</span>
+                            <span className="text-right">ID Template</span>
+                        </li>
+                        {localCatalog.map(c => {
+                           const colorClass = colorOptions.find(opt => opt.value === c.default_color)?.class || 'bg-slate-400';
+                           const templateId = `${colorToCodeMap[c.default_color || 'grey'] || '00'}XX${c.code.padStart(4, '0')}`;
+                           return (
+                             <li key={c.code} className="py-3 px-3 grid grid-cols-3 gap-4 items-center">
+                               <div>
+                                 <p className="font-semibold text-slate-700 text-sm">{c.name}</p>
+                                 <p className="text-xs text-slate-500 font-mono">{c.code}</p>
+                               </div>
+                               <div className="flex justify-center">
+                                 <div title={c.default_color} className={`w-5 h-5 rounded-full border border-black/10 ${colorClass}`}></div>
+                               </div>
+                               <div className="text-right font-mono text-slate-600 text-sm">
+                                 {formatRFID(templateId)}
+                               </div>
+                             </li>
+                           )
+                        })}
+                      </ul>
+                    </div>
+                </div>
+            </details>
           </div>
         );
       case 'MAGAZIJN':

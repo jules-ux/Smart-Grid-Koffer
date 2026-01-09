@@ -76,12 +76,27 @@ function App() {
         await fetchData();
         const channel = supabase.channel('realtime-monitoring').on('postgres_changes',{ event: '*', schema: 'public' },fetchData).subscribe();
         return () => { supabase.removeChannel(channel); };
-    } catch(e: any) {
-        let errorMessage = `Fout bij initialisatie: ${e.message}. Laden van demo data.`;
-        if (e.message && e.message.toLowerCase().includes('failed to fetch')) {
-            errorMessage = 'Netwerkfout: Kon de server niet bereiken. Controleer uw internetverbinding. Demo data wordt geladen.';
+    } catch (e: any) {
+        // FIX: Verbeterde error logging om "[object Object]" te voorkomen en specifiekere feedback te geven.
+        let detailedMessage = 'Onbekende fout bij initialisatie. Laden van demo data.';
+        
+        if (e instanceof Error) {
+            detailedMessage = e.message;
+        } else if (typeof e === 'object' && e !== null && e.message) {
+            detailedMessage = String(e.message);
+        } else if (typeof e === 'string') {
+            detailedMessage = e;
         }
-        setConnectionError(errorMessage);
+        
+        // Maak de boodschap gebruiksvriendelijker voor veelvoorkomende problemen
+        if (detailedMessage.toLowerCase().includes('failed to fetch')) {
+            detailedMessage = 'Netwerkfout: Kon de server niet bereiken. Controleer uw internetverbinding. Demo data wordt geladen.';
+        } else if (detailedMessage.toLowerCase().includes("could not find the column") && detailedMessage.toLowerCase().includes("'catalog'")) {
+            detailedMessage = "Database schema is verouderd. De 'catalog' tabel mist een kolom. Voer het nieuwste SQL script uit vanuit de 'Database Setup' tab in de Beheerconsole.";
+        }
+        
+        console.error('Fout bij initialisatie:', detailedMessage, { originalError: e });
+        setConnectionError(`Fout: ${detailedMessage}`);
         setBackpacks(MOCK_BACKPACKS);
         setMasterLayout({ grid_cols: 4, grid_rows: 4, modules: MOCK_BACKPACKS[0].modules.map(m => ({...m, status: 'OK'})) });
     }
@@ -342,6 +357,11 @@ function App() {
             />
             
             <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
+                {connectionError && (
+                    <div className="bg-Warning-50 text-Warning-600 p-4 rounded-xl border border-Warning-100 mb-6">
+                        <p className="font-bold text-sm">{connectionError}</p>
+                    </div>
+                )}
                 {currentView === 'DASHBOARD' && <DashboardView backpacks={backpacks} isMobile={false} onSelectBackpack={handleSelectBackpack} />}
                 {currentView === 'DASHBOARD_MOBILE' && <DashboardView backpacks={backpacks} isMobile={true} onSelectBackpack={handleSelectBackpack} />}
                 {currentView === 'ADMIN' && <AdminPanel onBackpackAdded={fetchData} catalog={catalog} />}

@@ -7,10 +7,12 @@ interface SideNavProps {
 }
 
 const SideNav: React.FC<SideNavProps> = ({ currentView, onNavigate }) => {
+  // FIX: Use 'as const' to ensure TypeScript infers the literal types for `view`,
+  // resolving the type error on the onClick handler.
   const navItems = [
     { view: 'DASHBOARD', label: 'Dashboard', icon: LayoutDashboard },
     { view: 'ADMIN', label: 'Beheer', icon: Settings },
-  ];
+  ] as const;
 
   return (
     <nav className="hidden lg:flex flex-col w-64 bg-white border-r border-slate-200 p-4">
