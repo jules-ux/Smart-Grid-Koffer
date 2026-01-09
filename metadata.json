@@ -1,0 +1,7 @@
+{
+  "name": "Smart-Grid Urgentie Dashboard",
+  "description": "Een medisch IoT-dashboard voor het beheren van slimme urgentierugzakken, inclusief statusmonitoring, inhoudsverificatie en pick-lijst generatie voor apothekers.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
